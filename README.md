@@ -122,6 +122,12 @@ labels:
   cache_ttl: "60s"       # refresh interval
   cache_max_series: 50000
 
+cache:                   # in-memory query-result cache (off by default)
+  enabled: true          # cache /query and /query_range responses
+  max_size: 1000         # max cached responses (LRU)
+  ttl: "60s"             # entry lifetime
+  max_freshness: "60s"   # skip caching windows whose end is within this of now
+
 downsampling:            # read-only - proxy uses tiers for query routing
   enabled: true          # but does NOT create tables/MVs
   tiers:
@@ -645,7 +651,8 @@ If you already run ClickHouse, PromClick gives you infinite Prometheus retention
 - [ ] **Ruler** - PromQL rule evaluation engine with Alertmanager integration
 - [x] **Helm chart** - one-click deploy to Kubernetes
 - [ ] **K8s operator** - CRD-based management of PromClick instances
-- [ ] **Redis / Memcached query cache** - sub-millisecond responses for repeated queries
+- [x] **In-memory query cache** - LRU + TTL + singleflight (`cache.enabled`)
+- [ ] **Redis / Memcached query cache** - shared/distributed cache across proxies
 - [ ] Subquery support (`metric[1h:5m]`)
 - [ ] Native histograms
 - [ ] TLS

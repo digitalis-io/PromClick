@@ -7,6 +7,8 @@ import (
 	"io"
 	"net/http"
 	"strings"
+
+	"github.com/prometheus/prometheus/model/labels"
 )
 
 // MetaQuerier performs metadata queries against ClickHouse HTTP interface.
@@ -174,6 +176,121 @@ func (m *MetaQuerier) LabelValues(ctx context.Context, labelName, tagsTable, met
 		}
 	}
 	return result, nil
+}
+
+// colMatchCond renders a single matcher as a ClickHouse boolean condition on
+// the given column expression. Regex matchers are anchored to match Prometheus
+// semantics. Values are escaped for inline SQL.
+func colMatchCond(col string, mt labels.MatchType, value string) string {
+	v := chEscape(value)
+	switch mt {
+	case labels.MatchNotEqual:
+		return fmt.Sprintf("%s != '%s'", col, v)
+	case labels.MatchRegexp:
+		return fmt.Sprintf("match(%s, '^(?:%s)$')", col, v)
+	case labels.MatchNotRegexp:
+		return fmt.Sprintf("NOT match(%s, '^(?:%s)$')", col, v)
+	default: // MatchEqual
+		return fmt.Sprintf("%s = '%s'", col, v)
+	}
+}
+
+// chMatcherWhere builds a WHERE clause (without the leading WHERE) applying
+// every matcher against the Prometheus-mode time_series schema: __name__ maps
+// to the metric-name column, other labels to JSONExtractString(labels, name).
+func chMatcherWhere(all []*labels.Matcher, metricNameCol, labelsCol string) string {
+	if len(all) == 0 {
+		return "1"
+	}
+	conds := make([]string, 0, len(all))
+	for _, mt := range all {
+		col := fmt.Sprintf("JSONExtractString(%s, '%s')", labelsCol, chEscape(mt.Name))
+		if mt.Name == labels.MetricName {
+			col = metricNameCol
+		}
+		conds = append(conds, colMatchCond(col, mt.Type, mt.Value))
+	}
+	return strings.Join(conds, " AND ")
+}
+
+// otelMatcherWhere builds a WHERE clause for OTel mode: __name__ maps to the
+// sanitised MetricName, other labels to the merged attribute map.
+func otelMatcherWhere(all []*labels.Matcher) string {
+	if len(all) == 0 {
+		return "1"
+	}
+	conds := make([]string, 0, len(all))
+	for _, mt := range all {
+		col := "(" + otelLabelsExpr + ")['" + chEscape(mt.Name) + "']"
+		if mt.Name == labels.MetricName {
+			col = otelSanitize("MetricName")
+		}
+		conds = append(conds, colMatchCond(col, mt.Type, mt.Value))
+	}
+	return strings.Join(conds, " AND ")
+}
+
+// SeriesMatch queries ClickHouse for the label sets matching a single selector,
+// applying every matcher. Used as the fallback when the label cache cannot
+// answer (cache disabled/unloaded, or a regex/negated metric-name matcher).
+func (m *MetaQuerier) SeriesMatch(ctx context.Context, sel parsedSelector, tagsTable, metricNameCol, labelsCol string, limit int) ([]map[string]string, error) {
+	var sql string
+	if m.Mode == "otel" {
+		where := otelMatcherWhere(sel.All)
+		sql = "SELECT DISTINCT " + otelSanitize("MetricName") + " AS metric_name, " +
+			otelLabelsExpr + " AS labels FROM " +
+			m.otelUnion("MetricName, ResourceAttributes, Attributes", where) +
+			fmt.Sprintf(" LIMIT %d", limit)
+	} else {
+		where := chMatcherWhere(sel.All, metricNameCol, labelsCol)
+		sql = fmt.Sprintf(
+			"SELECT %s AS metric_name, %s AS labels FROM %s WHERE %s ORDER BY unix_milli DESC LIMIT 1 BY fingerprint LIMIT %d",
+			metricNameCol, labelsCol, tagsTable, where, limit,
+		)
+	}
+
+	rows, err := m.query(ctx, sql)
+	if err != nil {
+		return nil, err
+	}
+
+	results := make([]map[string]string, 0, len(rows))
+	for _, row := range rows {
+		var v struct {
+			MetricName string          `json:"metric_name"`
+			Labels     json.RawMessage `json:"labels"`
+		}
+		if err := json.Unmarshal(row, &v); err != nil {
+			continue
+		}
+		lbls := decodeLabels(v.Labels)
+		labelSet := make(map[string]string, len(lbls)+1)
+		labelSet["__name__"] = v.MetricName
+		for k, val := range lbls {
+			labelSet[k] = val
+		}
+		results = append(results, labelSet)
+	}
+	return results, nil
+}
+
+// decodeLabels decodes the JSONEachRow "labels" column, which is either a JSON
+// object (Map columns, OTel mode) or a JSON-encoded string containing an object
+// (the default String labels column). Returns an empty map on anything else.
+func decodeLabels(raw json.RawMessage) map[string]string {
+	out := map[string]string{}
+	if len(raw) == 0 {
+		return out
+	}
+	if raw[0] == '"' {
+		var s string
+		if json.Unmarshal(raw, &s) == nil && s != "" {
+			_ = json.Unmarshal([]byte(s), &out)
+		}
+		return out
+	}
+	_ = json.Unmarshal(raw, &out)
+	return out
 }
 
 // parseCount extracts a count value from CH JSON row (count() returns string in JSONEachRow).

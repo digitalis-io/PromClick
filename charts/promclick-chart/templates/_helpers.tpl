@@ -49,6 +49,12 @@ labels:
   cache_ttl: "60s"
   cache_max_series: 50000
 
+cache:
+  enabled: false
+  max_size: 1000
+  ttl: "60s"
+  max_freshness: "60s"
+
 cors:
   allow_origin: "*"
 
