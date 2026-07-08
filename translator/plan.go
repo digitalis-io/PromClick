@@ -127,6 +127,13 @@ func (p *SQLPlan) Render() (string, *clickhouse.QueryParams) {
 	if cfg == nil {
 		return "-- no config", params
 	}
+
+	// OTel single-table mode: read the OpenTelemetry ClickHouse-exporter metric
+	// tables directly instead of the Prometheus samples+time_series JOIN.
+	if cfg.Schema.Mode == "otel" {
+		return p.renderOTel(cfg, params)
+	}
+
 	cols := cfg.Schema.Columns
 
 	var b strings.Builder
@@ -177,6 +184,99 @@ func (p *SQLPlan) Render() (string, *clickhouse.QueryParams) {
 
 	fmt.Fprintf(&b, "\nORDER BY s.%s ASC, s.%s ASC", cols.Fingerprint, cols.Timestamp)
 
+	return b.String(), params
+}
+
+// renderOTel builds a single-table read against the OpenTelemetry ClickHouse
+// exporter metric tables (otel_metrics_gauge / otel_metrics_sum and their _dist
+// Distributed views). Those tables carry one wide row per datapoint —
+// MetricName, TimeUnix (DateTime), Value (Float64), Attributes and
+// ResourceAttributes (Map) — with no fingerprint column and no separate
+// time_series table. This synthesises the four columns the fetcher expects
+// (fingerprint String, ts Int64 ms, value Float64, labels JSON):
+//
+//   - fingerprint = cityHash64(MetricName, ResourceAttributes, Attributes)
+//   - labels      = ResourceAttributes merged with Attributes, keys sanitised to
+//     valid Prometheus label names ([^a-zA-Z0-9_] -> '_', so k8s.pod.name ->
+//     k8s_pod_name, service.name -> service_name), emitted as a JSON object.
+//   - matchers filter on the sanitised merged map.
+//
+// Tables in cfg.Schema.Tables are UNIONed (each pushes the metric-name and time
+// predicate down for partition pruning); only the table holding a given metric
+// contributes rows.
+func (p *SQLPlan) renderOTel(cfg *config.Config, params *clickhouse.QueryParams) (string, *clickhouse.QueryParams) {
+	tables := cfg.Schema.Tables
+	if len(tables) == 0 {
+		tables = []string{cfg.Schema.SamplesTable}
+	}
+
+	params.AddString("metricName", p.MetricName)
+	params.AddInt64("dataStart", p.DataStartMs)
+	params.AddInt64("dataEnd", p.DataEndMs)
+
+	// Per-table arm: filter by metric name + time window, carry the merged
+	// attribute map forward.
+	const mergedExpr = "mapConcat(ResourceAttributes, Attributes)"
+	var arms []string
+	for _, tbl := range tables {
+		// OTel metric names are dotted (system.memory.usage); PromQL names are
+		// underscored. Match either the raw stored name or its Prometheus-
+		// sanitised form so both `{__name__="system.memory.usage"}` and the bare
+		// `system_memory_usage` selector resolve.
+		arms = append(arms, fmt.Sprintf(
+			"SELECT MetricName, TimeUnix, Value, %s AS allattr\n"+
+				"    FROM %s\n"+
+				"    WHERE (MetricName = {metricName:String}\n"+
+				"           OR replaceRegexpAll(MetricName, '[^a-zA-Z0-9_]', '_') = {metricName:String})\n"+
+				"      AND TimeUnix >  toDateTime({dataStart:Int64} / 1000)\n"+
+				"      AND TimeUnix <= toDateTime({dataEnd:Int64} / 1000)",
+			mergedExpr, tbl))
+	}
+
+	var b strings.Builder
+	b.WriteString("SELECT toString(fp) AS fingerprint, ts, value, toJSONString(lbls) AS labels\nFROM (\n")
+	// Compute fingerprint, ms timestamp, value and the sanitised label map.
+	b.WriteString("  SELECT\n")
+	b.WriteString("    cityHash64(MetricName, toString(allattr)) AS fp,\n")
+	b.WriteString("    toInt64(toUnixTimestamp(TimeUnix)) * 1000 AS ts,\n")
+	b.WriteString("    Value AS value,\n")
+	b.WriteString("    mapFromArrays(\n")
+	b.WriteString("      arrayMap(k -> replaceRegexpAll(k, '[^a-zA-Z0-9_]', '_'), mapKeys(allattr)),\n")
+	b.WriteString("      mapValues(allattr)\n")
+	b.WriteString("    ) AS lbls\n")
+	b.WriteString("  FROM (\n    ")
+	b.WriteString(strings.Join(arms, "\n    UNION ALL\n    "))
+	b.WriteString("\n  )\n)")
+
+	// Label matchers on the sanitised merged map.
+	first := true
+	for i, m := range p.Matchers {
+		paramName := fmt.Sprintf("lv%d", i)
+		labelKey := fmt.Sprintf("lk%d", i)
+		labelOp := fmt.Sprintf("lo%d", i)
+		params.AddString(paramName, m.Val)
+		params.AddString(labelKey, m.Name)
+		params.AddString(labelOp, m.Op)
+		accessor := fmt.Sprintf("lbls[{%s:String}]", labelKey)
+		if first {
+			b.WriteString("\nWHERE ")
+			first = false
+		} else {
+			b.WriteString("\n  AND ")
+		}
+		switch m.Op {
+		case "=":
+			fmt.Fprintf(&b, "%s = {%s:String}", accessor, paramName)
+		case "!=":
+			fmt.Fprintf(&b, "%s != {%s:String}", accessor, paramName)
+		case "=~":
+			fmt.Fprintf(&b, "match(%s, {%s:String})", accessor, paramName)
+		case "!~":
+			fmt.Fprintf(&b, "NOT match(%s, {%s:String})", accessor, paramName)
+		}
+	}
+
+	b.WriteString("\nORDER BY fingerprint ASC, ts ASC")
 	return b.String(), params
 }
 

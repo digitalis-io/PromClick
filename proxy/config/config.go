@@ -22,6 +22,11 @@ type SchemaConfig struct {
 	TimeSeriesTable string       `yaml:"time_series_table"`
 	Columns         ColumnConfig `yaml:"columns"`
 	LabelsType      string       `yaml:"labels_type"`
+	// Mode "otel" reads the OpenTelemetry ClickHouse-exporter metric tables
+	// directly (single wide row per datapoint) instead of the Prometheus
+	// samples+time_series JOIN. Tables lists the OTel metric tables to UNION.
+	Mode   string   `yaml:"mode"`
+	Tables []string `yaml:"tables"`
 }
 
 // ColumnConfig maps column names.

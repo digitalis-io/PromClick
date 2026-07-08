@@ -54,6 +54,12 @@ func (ev *Evaluator) EvalPlan(
 	step time.Duration,
 ) (*types.QueryResult, error) {
 
+	// Guard: a nil plan (e.g. a folded-out binary operand) must not panic —
+	// surface a clean error instead of a nil-pointer dereference.
+	if plan == nil {
+		return nil, fmt.Errorf("nil plan")
+	}
+
 	if plan.IsScalar {
 		return &types.QueryResult{
 			Type:   "vector",
@@ -139,6 +145,20 @@ func (ev *Evaluator) evalBinaryPlan(
 	start, end time.Time,
 	step time.Duration,
 ) (*types.QueryResult, error) {
+	// Both sides scalar literals (e.g. `1+1`, Grafana's datasource health check).
+	// transpileBinary nils out both LHS and RHS in this case, so the scalar-RHS
+	// branch below would dereference a nil LHS. Fold the constant directly.
+	if plan.IsScalarLHS && plan.IsScalarRHS {
+		lhsRes := &types.QueryResult{
+			Type:   "vector",
+			Vector: types.Vector{{F: plan.ScalarLHS, T: start.UnixMilli()}},
+		}
+		result := applyScalarBinary(lhsRes, plan.ScalarRHS, plan.BinaryOp, plan.ReturnBool, false)
+		if len(plan.MathChain) > 0 {
+			applyMathChainResult(result, plan.MathChain)
+		}
+		return result, nil
+	}
 	// Handle scalar RHS (e.g. expr > 0, exp(rate/1000))
 	if plan.IsScalarRHS {
 		lhsRes, err := ev.EvalPlan(ctx, plan.LHS, start, end, step)

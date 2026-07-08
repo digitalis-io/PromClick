@@ -119,6 +119,8 @@ func main() {
 		User:       cfg.ClickHouse.User,
 		Password:   cfg.ClickHouse.Password,
 		HTTPClient: metaHTTPClient,
+		Mode:       cfg.Schema.Mode,
+		Tables:     cfg.Schema.Tables,
 	}
 
 	// Create handler
