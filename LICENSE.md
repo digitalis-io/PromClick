@@ -176,7 +176,8 @@
 
    END OF TERMS AND CONDITIONS
 
-   Copyright 2026 Authors of PromClick
+   Copyright 2026 The PromClick Authors (https://github.com/PromClick/PromClick)
+   Modifications Copyright 2026 Digitalis.io Ltd. (https://digitalis.io)
 
    Licensed under the Apache License, Version 2.0 (the "License");
    you may not use this file except in compliance with the License.

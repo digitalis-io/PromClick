@@ -1,0 +1,33 @@
+PromClick
+=========
+
+PromClick is a PromQL-to-SQL transpiler and Prometheus-compatible HTTP proxy
+for ClickHouse.
+
+This product includes software originally developed by the PromClick Authors:
+
+    Copyright 2026 The PromClick Authors
+    https://github.com/PromClick/PromClick
+
+    Original authors:
+      - Mateusz Darmetko (hinskii)  <darmetkomateusz@gmail.com>
+      - Maciej Bekas                <bekasmaciej@gmail.com>
+      - Pavel Kravtsov              <kravtsovpo@gmail.com>
+
+Licensed under the Apache License, Version 2.0 (the "License"); you may not use
+the original work except in compliance with the License. A copy of the License
+is included in the LICENSE.md file and is available at:
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+--------------------------------------------------------------------------------
+
+Modifications and packaging for the Digitalis.io distribution:
+
+    Copyright 2026 Digitalis.io Ltd.
+    https://digitalis.io
+
+Digitalis.io vendors and maintains this distribution of PromClick. All original
+copyright, patent, trademark, and attribution notices from the upstream project
+are retained above as required by the Apache License, Version 2.0. The Digitalis
+distribution is likewise made available under the Apache License, Version 2.0.

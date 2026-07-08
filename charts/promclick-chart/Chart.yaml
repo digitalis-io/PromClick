@@ -2,5 +2,12 @@ apiVersion: v2
 name: promclick-chart
 description: PromClick is a PromQL-to-SQL transpiler + HTTP proxy that makes ClickHouse speak Prometheus.
 type: application
-version: 1.0.0
+version: 1.1.0
 appVersion: "0.1.0"
+home: https://github.com/digitalis-io/PromClick
+sources:
+  - https://github.com/digitalis-io/PromClick
+  - https://github.com/PromClick/PromClick
+maintainers:
+  - name: Digitalis.io
+    url: https://digitalis.io

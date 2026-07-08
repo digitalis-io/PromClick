@@ -1,4 +1,17 @@
+<p align="center">
+  <a href="https://digitalis.io">
+    <img src="https://digitalis-marketplace-assets.s3.us-east-1.amazonaws.com/DigitalisDigital_DigitalisFullLogoGradient+-+medium.png" alt="Digitalis.io" width="320"/>
+  </a>
+</p>
+
 # PromClick
+
+> **A Digitalis.io distribution.** PromClick was originally created by the
+> [PromClick Authors](https://github.com/PromClick/PromClick) and is licensed under
+> Apache 2.0. Digitalis.io vendors and maintains this distribution, preserving the
+> original attribution. See [Attribution](#attribution) and [`NOTICE`](NOTICE).
+
+A Prometheus-compatible HTTP API that translates PromQL to ClickHouse SQL in real time.
 
 **I was tired of Thanos. I was tired of Victoria Metrics. I was tired of Grafana Mimir and I'm tired of everything.**
 
@@ -83,11 +96,11 @@ TSDB Status page shows series count, sample count, top metrics, and label cardin
 PromClick ships as a single Docker image with three binaries inside. Each handles one concern:
 
 ```bash
-docker pull quay.io/hinski/promclick:0.1.0
+docker pull ghcr.io/digitalis-io/promclick:0.1.0
 
-docker run quay.io/hinski/promclick promclick-proxy       --config proxy.yaml
-docker run quay.io/hinski/promclick promclick-writer      --config writer.yaml
-docker run quay.io/hinski/promclick promclick-downsampler  --config downsampler.yaml
+docker run ghcr.io/digitalis-io/promclick promclick-proxy       --config proxy.yaml
+docker run ghcr.io/digitalis-io/promclick promclick-writer      --config writer.yaml
+docker run ghcr.io/digitalis-io/promclick promclick-downsampler  --config downsampler.yaml
 ```
 
 ### promclick-proxy (query server)
@@ -190,7 +203,7 @@ interval: "1h"   # re-check interval in daemon mode
 ### Docker Compose (all-in-one)
 
 ```bash
-git clone https://github.com/PromClick/PromClick
+git clone https://github.com/digitalis-io/PromClick
 cd promclick
 docker compose up -d
 
@@ -572,7 +585,7 @@ With full support for: `on()`, `ignoring()`, `group_left()`, `group_right()`, `b
 ## Quick Start
 
 ```bash
-git clone https://github.com/PromClick/PromClick
+git clone https://github.com/digitalis-io/PromClick
 cd promclick
 docker compose up -d
 ```
@@ -593,7 +606,7 @@ The compose stack runs everything: ClickHouse, Prometheus, Node Exporter, PromCl
 Yes, there's a Helm chart.
 
 ```bash
-helm pull oci://ghcr.io/promclick/promclick-chart --version <version>
+helm pull oci://ghcr.io/digitalis-io/promclick-chart --version <version>
 ```
 
 ---
@@ -639,9 +652,29 @@ If you already run ClickHouse, PromClick gives you infinite Prometheus retention
 
 ---
 
+## Attribution
+
+PromClick was originally created by the
+[PromClick Authors](https://github.com/PromClick/PromClick) — Mateusz Darmetko
+(hinskii), Maciej Bekas, and Pavel Kravtsov — and released under the Apache
+License 2.0.
+
+This repository is the **Digitalis.io distribution** of PromClick. Digitalis.io
+vendors and maintains it, preserving all upstream copyright and attribution
+notices as required by the licence. The full attribution is recorded in the
+[`NOTICE`](NOTICE) file.
+
 ## License
 
-Apache 2.0
+Licensed under the [Apache License, Version 2.0](LICENSE.md).
+
+- Original work © The PromClick Authors.
+- Modifications and packaging © Digitalis.io Ltd.
+
+## Contact
+
+Maintained by [Digitalis.io](https://digitalis.io). For support, get in touch at
+[digitalis.io/contact](https://digitalis.io/contact).
 
 ---
 

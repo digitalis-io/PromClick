@@ -54,7 +54,7 @@ services:
         condition: service_healthy
 
   promclick-proxy:
-    image: quay.io/hinski/promclick:0.1.0
+    image: ghcr.io/digitalis-io/promclick:0.1.0
     container_name: promclick-proxy
     entrypoint: ["promclick-proxy"]
     command: ["--config", "proxy.yaml"]
@@ -68,7 +68,7 @@ services:
     restart: unless-stopped
 
   promclick-writer:
-    image: quay.io/hinski/promclick:0.1.0
+    image: ghcr.io/digitalis-io/promclick:0.1.0
     container_name: promclick-writer
     entrypoint: ["promclick-writer"]
     command: ["--config", "writer.yaml"]
@@ -82,7 +82,7 @@ services:
     restart: unless-stopped
 
   promclick-downsampler:
-    image: quay.io/hinski/promclick:0.1.0
+    image: ghcr.io/digitalis-io/promclick:0.1.0
     container_name: promclick-downsampler
     entrypoint: ["promclick-downsampler"]
     command: ["--config", "downsampler.yaml"]

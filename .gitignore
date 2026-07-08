@@ -19,3 +19,6 @@ promclick-downsampler
 .DS_Store
 Thumbs.db
 
+
+# Built binaries
+proxy/proxy
