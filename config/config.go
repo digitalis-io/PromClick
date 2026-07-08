@@ -32,6 +32,17 @@ type SchemaConfig struct {
 	ExtractedColumns []ExtractedColumn  `yaml:"extracted_columns"`
 	Downsampling     DownsamplingConfig `yaml:"downsampling"`
 	TimestampIsInt   bool               `yaml:"timestamp_is_int"` // true if timestamp column is Int64 (unix_milli), false if DateTime64
+
+	// Mode selects the read model. "" (default) is the Prometheus two-table
+	// layout (samples + time_series JOIN). "otel" reads the OpenTelemetry
+	// ClickHouse-exporter metric tables directly (single wide row per datapoint:
+	// MetricName / TimeUnix / Value / Attributes+ResourceAttributes Maps), with
+	// no fingerprint column or time_series table — fingerprint and labels are
+	// computed in SQL. See renderOTel in the translator.
+	Mode string `yaml:"mode"`
+	// Tables lists the OTel metric tables to UNION in "otel" mode (e.g.
+	// otel_metrics_gauge_dist, otel_metrics_sum_dist). Ignored unless Mode=="otel".
+	Tables []string `yaml:"tables"`
 }
 
 type DownsamplingConfig struct {

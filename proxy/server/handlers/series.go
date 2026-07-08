@@ -65,10 +65,23 @@ func (m *MetaQuerier) Series(ctx context.Context, matchers []string, tagsTable, 
 		return nil, fmt.Errorf("no metric name found in matchers")
 	}
 
-	sql := fmt.Sprintf(
-		"SELECT %s AS metric_name, %s AS labels FROM %s WHERE %s = '%s' ORDER BY unix_milli DESC LIMIT 1 BY fingerprint LIMIT 100",
-		metricNameCol, labelsCol, tagsTable, metricNameCol, metricName,
-	)
+	var sql string
+	if m.Mode == "otel" {
+		// Read distinct label sets for the metric straight from the OTel tables,
+		// matching raw or sanitised metric name (see renderOTel).
+		mn := chEscape(metricName)
+		where := fmt.Sprintf("(MetricName = '%s' OR %s = '%s')", mn, otelSanitize("MetricName"), mn)
+		// Emit the Map directly (not toJSONString) so JSONEachRow serialises it
+		// as a JSON object that decodes straight into map[string]string.
+		sql = "SELECT DISTINCT " + otelSanitize("MetricName") + " AS metric_name, " +
+			otelLabelsExpr + " AS labels FROM " +
+			m.otelUnion("MetricName, ResourceAttributes, Attributes", where) + " LIMIT 500"
+	} else {
+		sql = fmt.Sprintf(
+			"SELECT %s AS metric_name, %s AS labels FROM %s WHERE %s = '%s' ORDER BY unix_milli DESC LIMIT 1 BY fingerprint LIMIT 100",
+			metricNameCol, labelsCol, tagsTable, metricNameCol, metricName,
+		)
+	}
 
 	rows, err := m.query(ctx, sql)
 	if err != nil {

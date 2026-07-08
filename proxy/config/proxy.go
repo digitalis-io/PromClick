@@ -121,6 +121,8 @@ func (c *Config) ToPromqlConfig() *promqlcfg.Config {
 			},
 			LabelsType:     c.Schema.LabelsType,
 			TimestampIsInt: true,
+			Mode:           c.Schema.Mode,
+			Tables:         c.Schema.Tables,
 		},
 		Prometheus: promqlcfg.PrometheusConfig{
 			StalenessSeconds: 300,

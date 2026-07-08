@@ -1,0 +1,27 @@
+# VCS
+.git
+.gitignore
+.github
+
+# Docs / local artifacts
+*.md
+img/
+output/
+
+# Node / build outputs
+node_modules
+proxy/ui/node_modules
+proxy/ui/dist
+
+# Built binaries
+promclick-proxy
+promclick-writer
+promclick-downsampler
+proxy/proxy
+*.exe
+
+# Editor / OS
+.idea
+.vscode
+*.swp
+.DS_Store

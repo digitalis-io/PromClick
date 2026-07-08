@@ -3,7 +3,7 @@ deployments:
   promClickProxy:
     replicas: 1
     image:
-      repository: quay.io/hinski/promclick
+      repository: ghcr.io/digitalis-io/promclick
 #      tag: 0.1.0 # tags can be overriden like this, by default it takes appVersion from Chart.yaml
     name: promclick-proxy
     command: ["promclick-proxy"]
@@ -50,7 +50,7 @@ deployments:
   promClickWriter:
     replicas: 1
     image:
-      repository: quay.io/hinski/promclick
+      repository: ghcr.io/digitalis-io/promclick
 #      tag: 0.1.0 # tags can be overriden like this, by default it takes appVersion from Chart.yaml
     name: promclick-writter
     command: ["promclick-proxy"]
@@ -97,7 +97,7 @@ deployments:
   promClickDownsampler:
     replicas: 1
     image:
-      repository: quay.io/hinski/promclick
+      repository: ghcr.io/digitalis-io/promclick
 #      tag: 0.1.0 # tags can be overriden like this, by default it takes appVersion from Chart.yaml
     name: promclick-downsampler
     service:

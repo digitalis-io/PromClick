@@ -1,11 +1,16 @@
-FROM node:20-alpine AS frontend
+# Frontend output is architecture-independent, so build it once on the native
+# build platform regardless of the target arch.
+FROM --platform=$BUILDPLATFORM node:20-alpine AS frontend
 WORKDIR /ui
 COPY proxy/ui/package*.json ./
 RUN npm ci
 COPY proxy/ui/ .
 RUN npm run build
 
-FROM golang:1.24-alpine AS builder
+# Build on the native platform and cross-compile with GOARCH (CGO is disabled,
+# so no emulation is needed) — far faster than building under QEMU per arch.
+FROM --platform=$BUILDPLATFORM golang:1.24-alpine AS builder
+ARG TARGETARCH
 WORKDIR /src
 COPY go.work go.work.sum ./
 COPY go.mod go.sum ./
@@ -13,9 +18,9 @@ COPY proxy/go.mod proxy/go.sum ./proxy/
 RUN cd proxy && go mod download
 COPY . .
 COPY --from=frontend /ui/dist ./proxy/ui/dist
-RUN cd proxy && CGO_ENABLED=0 go build -o /usr/local/bin/promclick-proxy ./cmd/proxy/ \
- && CGO_ENABLED=0 go build -o /usr/local/bin/promclick-writer ./cmd/writer/ \
- && CGO_ENABLED=0 go build -o /usr/local/bin/promclick-downsampler ./cmd/downsampler/
+RUN cd proxy && CGO_ENABLED=0 GOARCH=$TARGETARCH go build -o /usr/local/bin/promclick-proxy ./cmd/proxy/ \
+ && CGO_ENABLED=0 GOARCH=$TARGETARCH go build -o /usr/local/bin/promclick-writer ./cmd/writer/ \
+ && CGO_ENABLED=0 GOARCH=$TARGETARCH go build -o /usr/local/bin/promclick-downsampler ./cmd/downsampler/
 
 FROM alpine:3.20
 RUN apk add --no-cache ca-certificates
