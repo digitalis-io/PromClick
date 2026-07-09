@@ -17,8 +17,9 @@ import (
 	"github.com/PromClick/PromClick/translator"
 	"github.com/PromClick/PromClick/types"
 
-	proxycfg "github.com/PromClick/PromClick/proxy/config"
+	"github.com/PromClick/PromClick/proxy/cache"
 	nativech "github.com/PromClick/PromClick/proxy/clickhouse"
+	proxycfg "github.com/PromClick/PromClick/proxy/config"
 )
 
 // Handler holds shared dependencies for query handlers.
@@ -28,7 +29,8 @@ type Handler struct {
 	Evaluator *eval.Evaluator
 	Meta      *MetaQuerier
 	Writer    *nativech.Writer
-	Pool      *nativech.Pool // native TCP pool for downsampled queries
+	Pool      *nativech.Pool     // native TCP pool for downsampled queries
+	Cache     *cache.ResultCache // optional in-memory query-result cache (nil = disabled)
 }
 
 // Query handles /api/v1/query (instant query).
@@ -61,32 +63,52 @@ func (h *Handler) Query(w http.ResponseWriter, r *http.Request) {
 	}
 	slog.Debug("transpile", "duration", time.Since(t0), "query", query)
 
-	// Label cache fast-path for instant queries
-	if result, ok := h.tryCacheOnlyAgg(plan, evalTime, evalTime, 0, t0); ok {
-		writeJSON(w, APIResponse{Status: "success", Data: formatResult(result)})
+	// Cache path: only cache instant queries with an explicit, sufficiently old
+	// evaluation time — an implicit "now" is a moving target and its data may
+	// still be arriving.
+	if h.Cache != nil {
+		now := time.Now()
+		key := cache.Key(query, evalTime.UnixMilli(), evalTime.UnixMilli(), 0)
+		store := evalTime.Before(now.Add(-h.Cfg.Cache.MaxFreshness))
+		entry, hit, err := h.Cache.Fetch(key, store, func() (cache.Entry, error) {
+			result, _, err := h.computeInstant(r, plan, evalTime, t0)
+			if err != nil {
+				return cache.Entry{}, err
+			}
+			b, ct := renderResultBytes(result)
+			return cache.Entry{Body: b, ContentType: ct}, nil
+		})
+		if err != nil {
+			writeError(w, http.StatusUnprocessableEntity, "execution", fmt.Sprintf("%v", err))
+			return
+		}
+		slog.Info("query", "query", query, "path", cachePath(hit), "total", time.Since(t0))
+		w.Header().Set("Content-Type", entry.ContentType)
+		_, _ = w.Write(entry.Body)
 		return
 	}
 
-	t1 := time.Now()
-	result, err := h.Evaluator.EvalPlan(r.Context(), plan, evalTime, evalTime, 0)
+	result, fast, err := h.computeInstant(r, plan, evalTime, t0)
 	if err != nil {
 		writeError(w, http.StatusUnprocessableEntity, "execution", fmt.Sprintf("%v", err))
 		return
 	}
+	if !fast {
+		series := resultSeriesCount(result)
+		slog.Info("query", "query", query, "series", series, "total", time.Since(t0))
+	}
+	writeResult(w, result)
+}
 
-	series := resultSeriesCount(result)
-	slog.Debug("eval", "duration", time.Since(t1), "series", series)
-
-	slog.Info("query",
-		"query", query,
-		"series", series,
-		"total", time.Since(t0),
-	)
-
-	writeJSON(w, APIResponse{
-		Status: "success",
-		Data:   formatResult(result),
-	})
+// computeInstant runs the label-cache fast path then the general evaluator for
+// an instant query. The returned bool is true when a fast path produced the
+// result (which logs its own line).
+func (h *Handler) computeInstant(r *http.Request, plan *translator.SQLPlan, evalTime, t0 time.Time) (*types.QueryResult, bool, error) {
+	if result, ok := h.tryCacheOnlyAgg(plan, evalTime, evalTime, 0, t0); ok {
+		return result, true, nil
+	}
+	result, err := h.Evaluator.EvalPlan(r.Context(), plan, evalTime, evalTime, 0)
+	return result, false, err
 }
 
 // QueryRange handles /api/v1/query_range (range query).
@@ -145,45 +167,82 @@ func (h *Handler) QueryRange(w http.ResponseWriter, r *http.Request) {
 	}
 	slog.Debug("transpile", "duration", time.Since(t0), "query", query)
 
+	// Cache path: cache the whole rendered response keyed by (query,start,end,
+	// step). Skip *storing* windows whose end touches "now" (max_freshness) —
+	// that data is still being written — but still serve them via singleflight.
+	if h.Cache != nil {
+		now := time.Now()
+		key := cache.Key(query, start.UnixMilli(), end.UnixMilli(), step.Milliseconds())
+		store := !end.After(now.Add(-h.Cfg.Cache.MaxFreshness))
+		entry, hit, err := h.Cache.Fetch(key, store, func() (cache.Entry, error) {
+			result, _, err := h.computeRange(r, plan, start, end, step, t0)
+			if err != nil {
+				return cache.Entry{}, err
+			}
+			b, ct := renderResultBytes(result)
+			return cache.Entry{Body: b, ContentType: ct}, nil
+		})
+		if err != nil {
+			writeError(w, http.StatusUnprocessableEntity, "execution", fmt.Sprintf("%v", err))
+			return
+		}
+		slog.Info("query_range", "query", query, "range", end.Sub(start).String(),
+			"step", step.String(), "path", cachePath(hit), "total", time.Since(t0))
+		w.Header().Set("Content-Type", entry.ContentType)
+		_, _ = w.Write(entry.Body)
+		return
+	}
+
+	result, fast, err := h.computeRange(r, plan, start, end, step, t0)
+	if err != nil {
+		writeError(w, http.StatusUnprocessableEntity, "execution", fmt.Sprintf("%v", err))
+		return
+	}
+	if !fast {
+		series := resultSeriesCount(result)
+		slog.Info("query_range",
+			"query", query,
+			"range", end.Sub(start).String(),
+			"step", step.String(),
+			"series", series,
+			"total", time.Since(t0),
+		)
+	}
+
+	writeResult(w, result)
+}
+
+// computeRange runs the label-cache and downsampling fast paths then the
+// general evaluator for a range query. The returned bool is true when a fast
+// path produced the result (which logs its own line).
+func (h *Handler) computeRange(r *http.Request, plan *translator.SQLPlan, start, end time.Time, step time.Duration, t0 time.Time) (*types.QueryResult, bool, error) {
 	// Label cache fast-path: count/group aggregations on plain selectors
 	// can be answered from cached labels without fetching samples from CH.
 	if result, ok := h.tryCacheOnlyAgg(plan, start, end, step, t0); ok {
-		writeResult(w, result)
-		return
+		return result, true, nil
 	}
 
 	// Downsampling fast-path: try tier query for supported functions
 	if h.Pool != nil && h.Cfg.Downsampling.Enabled && plan.FuncName != "" && plan.MetricName != "" {
 		if plan.FuncName == "histogram_quantile" {
 			if result, ok := h.tryDownsampledHistogram(r, plan, start, end, step, t0); ok {
-				writeResult(w, result)
-				return
+				return result, true, nil
 			}
 		} else if result, ok := h.tryDownsampledQuery(r, plan, start, end, step, t0); ok {
-			writeResult(w, result)
-			return
+			return result, true, nil
 		}
 	}
 
-	t1 := time.Now()
 	result, err := h.Evaluator.EvalPlan(r.Context(), plan, start, end, step)
-	if err != nil {
-		writeError(w, http.StatusUnprocessableEntity, "execution", fmt.Sprintf("%v", err))
-		return
+	return result, false, err
+}
+
+// cachePath maps a cache hit/miss to the slog "path" field value.
+func cachePath(hit bool) string {
+	if hit {
+		return "cache-hit"
 	}
-
-	series := resultSeriesCount(result)
-	slog.Debug("eval", "duration", time.Since(t1), "series", series)
-
-	slog.Info("query_range",
-		"query", query,
-		"range", end.Sub(start).String(),
-		"step", step.String(),
-		"series", series,
-		"total", time.Since(t0),
-	)
-
-	writeResult(w, result)
+	return "cache-miss"
 }
 
 // writeResult writes a query result as a Prometheus API JSON response.
@@ -1004,7 +1063,7 @@ func computeHistogramQuantile(phi float64, matrix types.Matrix, step time.Durati
 
 	// Index: series le label → value per timestamp
 	seriesByLE := make(map[string]map[int64]float64) // le_string → ts → value
-	leValues := make(map[string]float64)              // le_string → le_float
+	leValues := make(map[string]float64)             // le_string → le_float
 	for _, s := range matrix {
 		leStr, ok := s.Labels["le"]
 		if !ok {
@@ -1058,7 +1117,7 @@ func computeHistogramQuantile(phi float64, matrix types.Matrix, step time.Durati
 // applyMathFunc applies a per-value math transformation to all samples in the matrix.
 func applyMathFunc(matrix types.Matrix, fn string, plan *translator.SQLPlan) types.Matrix {
 	// Extract params for clamp functions
-	clampMin := plan.AggParam  // clamp_min param, or clamp min
+	clampMin := plan.AggParam    // clamp_min param, or clamp min
 	clampMax := plan.SmoothingTF // clamp max (stored in SmoothingTF)
 	if fn == "clamp_max" {
 		clampMax = plan.AggParam

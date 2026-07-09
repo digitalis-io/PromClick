@@ -2,10 +2,15 @@ package handlers
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
+	"log/slog"
 	"net/http"
+
+	"github.com/PromClick/PromClick/fingerprint"
 )
+
+// seriesLimit bounds the number of series returned by /api/v1/series and the
+// number scanned to answer scoped /labels and /label/{name}/values.
+const seriesLimit = 10000
 
 // Series handles /api/v1/series — returns label sets matching match[] selectors.
 func (h *Handler) Series(w http.ResponseWriter, r *http.Request) {
@@ -17,92 +22,82 @@ func (h *Handler) Series(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// For simplicity, extract metric name from first matcher and return label sets from CH
-	// match[] typically looks like: {__name__="metric"} or metric_name
-	results, err := h.Meta.Series(r.Context(), matchers,
-		h.PromCfg.Schema.TimeSeriesTable,
-		h.PromCfg.Schema.Columns.MetricName,
-		h.PromCfg.Schema.Columns.Labels,
-	)
+	sets, err := h.matchedSeries(r.Context(), matchers, seriesLimit)
 	if err != nil {
-		writeJSON(w, APIResponse{Status: "success", Data: []interface{}{}})
+		// Prometheus returns 200 with an empty result for unmatched/parse-empty
+		// selectors; surface parse errors as bad_data.
+		writeError(w, http.StatusBadRequest, "bad_data", err.Error())
 		return
 	}
-
-	writeJSON(w, APIResponse{Status: "success", Data: results})
+	if sets == nil {
+		sets = []map[string]string{}
+	}
+	writeJSON(w, APIResponse{Status: "success", Data: sets})
 }
 
-// Series on MetaQuerier — query CH for label sets matching a metric.
-func (m *MetaQuerier) Series(ctx context.Context, matchers []string, tagsTable, metricNameCol, labelsCol string) ([]map[string]string, error) {
-	// Extract metric name from matcher like "{__name__=\"up\"}" or "up" or "{__name__=~\"node_.*\"}"
-	metricName := ""
-	for _, match := range matchers {
-		// Try simple metric name (no braces)
-		if len(match) > 0 && match[0] != '{' {
-			metricName = match
-			break
+// matchedSeries resolves the distinct label sets (each including __name__)
+// matching any of the given match[] selectors, applying every label matcher.
+// It prefers the in-memory label cache when a selector carries a concrete
+// metric name, falling back to a scoped ClickHouse query otherwise.
+func (h *Handler) matchedSeries(ctx context.Context, rawMatchers []string, limit int) ([]map[string]string, error) {
+	var out []map[string]string
+	seen := make(map[uint64]struct{})
+
+	add := func(set map[string]string) bool {
+		fp := fingerprint.Compute(set)
+		if _, dup := seen[fp]; dup {
+			return true
 		}
-		// Try {__name__="value"} pattern
-		// Simple regex-free extraction
-		for i := 0; i < len(match)-1; i++ {
-			if match[i] == '"' {
-				end := i + 1
-				for end < len(match) && match[end] != '"' {
-					end++
+		seen[fp] = struct{}{}
+		out = append(out, set)
+		return len(out) < limit
+	}
+
+	useCache := h.Pool != nil && h.Pool.LabelCache != nil && h.Pool.LabelCache.IsLoaded()
+
+	for _, raw := range rawMatchers {
+		sel, err := parseSelector(raw)
+		if err != nil {
+			return nil, err
+		}
+
+		// Cache fast-path: needs a concrete metric name (regex/negated name
+		// matchers have no metric index to scan).
+		if useCache && sel.MetricName != "" {
+			if fps, ok := h.Pool.LabelCache.GetFingerprints(sel.MetricName, sel.Matchers); ok {
+				for _, fp := range fps {
+					lbls, hit := h.Pool.LabelCache.GetLabels(fp)
+					if !hit {
+						continue
+					}
+					set := make(map[string]string, len(lbls)+1)
+					set["__name__"] = sel.MetricName
+					for k, v := range lbls {
+						set[k] = v
+					}
+					if !add(set) {
+						return out, nil
+					}
 				}
-				if end < len(match) {
-					metricName = match[i+1 : end]
-					break
-				}
+				continue
 			}
 		}
-		if metricName != "" {
-			break
+
+		// ClickHouse fallback: apply all matchers in SQL.
+		sets, err := h.Meta.SeriesMatch(ctx, sel,
+			h.PromCfg.Schema.TimeSeriesTable,
+			h.PromCfg.Schema.Columns.MetricName,
+			h.PromCfg.Schema.Columns.Labels,
+			limit)
+		if err != nil {
+			slog.Warn("series: clickhouse fallback failed", "error", err)
+			return nil, nil
+		}
+		for _, set := range sets {
+			if !add(set) {
+				return out, nil
+			}
 		}
 	}
-
-	if metricName == "" {
-		return nil, fmt.Errorf("no metric name found in matchers")
-	}
-
-	var sql string
-	if m.Mode == "otel" {
-		// Read distinct label sets for the metric straight from the OTel tables,
-		// matching raw or sanitised metric name (see renderOTel).
-		mn := chEscape(metricName)
-		where := fmt.Sprintf("(MetricName = '%s' OR %s = '%s')", mn, otelSanitize("MetricName"), mn)
-		// Emit the Map directly (not toJSONString) so JSONEachRow serialises it
-		// as a JSON object that decodes straight into map[string]string.
-		sql = "SELECT DISTINCT " + otelSanitize("MetricName") + " AS metric_name, " +
-			otelLabelsExpr + " AS labels FROM " +
-			m.otelUnion("MetricName, ResourceAttributes, Attributes", where) + " LIMIT 500"
-	} else {
-		sql = fmt.Sprintf(
-			"SELECT %s AS metric_name, %s AS labels FROM %s WHERE %s = '%s' ORDER BY unix_milli DESC LIMIT 1 BY fingerprint LIMIT 100",
-			metricNameCol, labelsCol, tagsTable, metricNameCol, metricName,
-		)
-	}
-
-	rows, err := m.query(ctx, sql)
-	if err != nil {
-		return nil, err
-	}
-
-	var results []map[string]string
-	for _, row := range rows {
-		var v struct {
-			MetricName string            `json:"metric_name"`
-			Labels     map[string]string `json:"labels"`
-		}
-		if err := json.Unmarshal(row, &v); err != nil {
-			continue
-		}
-		labelSet := make(map[string]string)
-		labelSet["__name__"] = v.MetricName
-		for k, val := range v.Labels {
-			labelSet[k] = val
-		}
-		results = append(results, labelSet)
-	}
-	return results, nil
+	return out, nil
 }

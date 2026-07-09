@@ -52,6 +52,7 @@ func (s *Server) Routes() http.Handler {
 
 	// Label values
 	mux.HandleFunc("GET /api/v1/label/{name}/values", s.handler.LabelValues)
+	mux.HandleFunc("POST /api/v1/label/{name}/values", s.handler.LabelValues)
 
 	// Series
 	mux.HandleFunc("GET /api/v1/series", s.handler.Series)

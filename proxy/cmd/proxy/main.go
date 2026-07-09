@@ -13,8 +13,9 @@ import (
 	"github.com/PromClick/PromClick/clickhouse"
 	"github.com/PromClick/PromClick/eval"
 
-	"github.com/PromClick/PromClick/proxy/config"
+	"github.com/PromClick/PromClick/proxy/cache"
 	nativech "github.com/PromClick/PromClick/proxy/clickhouse"
+	"github.com/PromClick/PromClick/proxy/config"
 	"github.com/PromClick/PromClick/proxy/server"
 	"github.com/PromClick/PromClick/proxy/server/handlers"
 )
@@ -123,6 +124,17 @@ func main() {
 		Tables:     cfg.Schema.Tables,
 	}
 
+	// Optional in-memory query-result cache
+	var resultCache *cache.ResultCache
+	if cfg.Cache.Enabled {
+		resultCache = cache.New(cfg.Cache.MaxSize, cfg.Cache.TTL)
+		logger.Info("query result cache enabled",
+			"max_size", cfg.Cache.MaxSize,
+			"ttl", cfg.Cache.TTL,
+			"max_freshness", cfg.Cache.MaxFreshness,
+		)
+	}
+
 	// Create handler
 	h := &handlers.Handler{
 		Cfg:       cfg,
@@ -130,6 +142,7 @@ func main() {
 		Evaluator: evaluator,
 		Meta:      meta,
 		Pool:      queryPool,
+		Cache:     resultCache,
 	}
 
 	// Create server

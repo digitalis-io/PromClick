@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -30,13 +31,10 @@ func writeJSON(w http.ResponseWriter, v interface{}) {
 	}
 }
 
-// writeMatrixResponse streams a matrix result directly to the writer,
-// avoiding intermediate []interface{} allocations for large result sets.
-func writeMatrixResponse(w http.ResponseWriter, matrix types.Matrix) {
-	w.Header().Set("Content-Type", "application/json")
-
-	bw := bufio.NewWriterSize(w, 64*1024)
-
+// encodeMatrix writes the full Prometheus matrix response envelope into bw,
+// avoiding intermediate []interface{} allocations for large result sets. It is
+// shared by the streaming writer and the byte builder used by the cache.
+func encodeMatrix(bw *bufio.Writer, matrix types.Matrix) {
 	bw.WriteString(`{"status":"success","data":{"resultType":"matrix","result":[`)
 
 	for si, s := range matrix {
@@ -65,9 +63,44 @@ func writeMatrixResponse(w http.ResponseWriter, matrix types.Matrix) {
 
 	bw.WriteString(`]}}`)
 	bw.WriteByte('\n')
+}
+
+// writeMatrixResponse streams a matrix result directly to the writer,
+// avoiding holding the full response in memory for large result sets.
+func writeMatrixResponse(w http.ResponseWriter, matrix types.Matrix) {
+	w.Header().Set("Content-Type", "application/json")
+
+	bw := bufio.NewWriterSize(w, 64*1024)
+	encodeMatrix(bw, matrix)
 	if err := bw.Flush(); err != nil {
 		slog.Error("writeMatrixResponse: flush failed", "error", err)
 	}
+}
+
+// matrixResponseBytes renders a matrix response into a byte slice using the
+// same encoding as writeMatrixResponse.
+func matrixResponseBytes(matrix types.Matrix) []byte {
+	var buf bytes.Buffer
+	buf.Grow(64 * 1024)
+	bw := bufio.NewWriter(&buf)
+	encodeMatrix(bw, matrix)
+	_ = bw.Flush()
+	return buf.Bytes()
+}
+
+// renderResultBytes serialises a query result into Prometheus API JSON bytes
+// and its content type, so the same bytes can be both cached and written to the
+// client. Mirrors writeResult's matrix/other split.
+func renderResultBytes(qr *types.QueryResult) ([]byte, string) {
+	if qr.Type == "matrix" && len(qr.Matrix) > 0 {
+		return matrixResponseBytes(qr.Matrix), "application/json"
+	}
+	b, err := json.Marshal(APIResponse{Status: "success", Data: formatResult(qr)})
+	if err != nil {
+		slog.Error("renderResultBytes: marshal failed", "error", err)
+	}
+	b = append(b, '\n')
+	return b, "application/json"
 }
 
 func writeError(w http.ResponseWriter, code int, errType string, err interface{}) {

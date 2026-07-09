@@ -13,6 +13,15 @@ labels:
   cache_ttl: "60s"
   cache_max_series: 50000
 
+# In-memory query-result cache (off by default). Caches /query and
+# /query_range responses keyed by (query, start, end, step) with singleflight
+# de-duplication of concurrent identical queries.
+cache:
+  enabled: false
+  max_size: 1000          # max cached responses (LRU)
+  ttl: "60s"              # entry lifetime
+  max_freshness: "60s"    # don't cache windows whose end is within this of now
+
 cors:
   allow_origin: "*"
 
