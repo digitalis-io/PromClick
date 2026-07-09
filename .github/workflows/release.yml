@@ -3,9 +3,12 @@ name: Release Helm Charts
 on:
   push:
     branches: [ "main" ]
+    tags: [ "v*" ]
 
+# contents: write is required to create GitHub Releases on tags.
+# packages: write is required to push chart packages to GHCR.
 permissions:
-  contents: read
+  contents: write
   packages: write
 
 jobs:
@@ -13,55 +16,80 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out code
-        uses: actions/checkout@v3
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           fetch-depth: 2
-  
+
       - name: Set up Helm
         uses: azure/setup-helm@v3
         with:
           version: v3.11.0
 
-      - name: Detect changed charts
+      - name: Select charts to release
         id: detect
         run: |
-          CHANGED_FILES=$(git diff --name-only HEAD^ HEAD || true)
-          CHART_FILES=$(echo "$CHANGED_FILES" | grep "^charts/" || true)
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            # On a tag, release every chart in the repository.
+            UNIQUE_CHARTS=$(find charts -mindepth 1 -maxdepth 1 -type d \
+              -exec test -f '{}/Chart.yaml' ';' -print \
+              | cut -d/ -f2 | sort | uniq)
+          else
+            # On a branch push, release only charts changed in this commit.
+            CHANGED_FILES=$(git diff --name-only HEAD^ HEAD || true)
+            CHART_FILES=$(echo "$CHANGED_FILES" | grep "^charts/" || true)
 
-          if [ -z "$CHART_FILES" ]; then
-            echo "No changes in 'charts/' folder."
-            echo "unique_charts=" >> $GITHUB_OUTPUT
-            exit 0
+            if [ -z "$CHART_FILES" ]; then
+              echo "No changes in 'charts/' folder."
+              echo "unique_charts=" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+
+            UNIQUE_CHARTS=$(echo "$CHART_FILES" | cut -d/ -f2 | sort | uniq)
           fi
 
-          UNIQUE_CHARTS=$(echo "$CHART_FILES" \
-            | cut -d/ -f2 \
-            | sort \
-            | uniq)
+          echo "unique_charts=$UNIQUE_CHARTS" >> "$GITHUB_OUTPUT"
 
-          echo "unique_charts=$UNIQUE_CHARTS" >> $GITHUB_OUTPUT
-
-      - name: Package and push changed charts
+      - name: Package and push charts
         if: ${{ steps.detect.outputs.unique_charts != '' }}
         env:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GHCR_OWNER: ${{ github.repository_owner }}
         run: |
           OWNER_LC=$(printf '%s' "$GHCR_OWNER" | tr '[:upper:]' '[:lower:]')
+
+          # On a tag (e.g. v1.2.3), version every chart to the tag (strip the leading v).
+          VERSION_ARGS=""
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+            VERSION_ARGS="--version $VERSION --app-version $VERSION"
+          fi
+
+          mkdir -p dist
+          printf '%s' "$GHCR_TOKEN" | helm registry login ghcr.io \
+                -u "${{ github.actor }}" \
+                --password-stdin
+
           for CHART_NAME in ${{ steps.detect.outputs.unique_charts }}; do
-            echo "Packaging & Publishing chart: $CHART_NAME"
+            echo "Packaging & publishing chart: $CHART_NAME"
             CHART_PATH="charts/$CHART_NAME"
 
-            helm package "$CHART_PATH" --destination "$CHART_PATH"
-            PACKAGE_TGZ=$(ls "$CHART_PATH"/*.tgz)
-            printf '%s' "$GHCR_TOKEN" | helm registry login ghcr.io \
-                  -u "${{ github.actor }}" \
-                  --password-stdin
+            helm package "$CHART_PATH" --destination dist $VERSION_ARGS
+            PACKAGE_TGZ=$(ls dist/"$CHART_NAME"-*.tgz)
 
             helm push "$PACKAGE_TGZ" "oci://ghcr.io/$OWNER_LC"
             echo "Published $CHART_NAME to GHCR."
           done
 
-      - name: No chart changes
+      - name: Create GitHub Release
+        # Only cut a GitHub Release on tags, attaching the packaged charts.
+        if: ${{ github.ref_type == 'tag' && steps.detect.outputs.unique_charts != '' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/*.tgz \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes
+
+      - name: No charts to release
         if: ${{ steps.detect.outputs.unique_charts == '' }}
-        run: echo "No chart changes to release."
+        run: echo "No charts to release."
